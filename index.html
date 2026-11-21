@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Сканер кальянной</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/barcode-detector@3.2.3/dist/iife/ponyfill.min.js"></script>
 <style>
   :root {
     --bg: var(--tg-theme-bg-color, #ffffff);
@@ -25,8 +25,13 @@
   .modes button { flex: 1; padding: 10px; border-radius: 12px; border: 2px solid transparent; background: var(--card); color: var(--text); font: inherit; font-weight: 600; }
   .modes button.on.empty { border-color: var(--out); }
   .modes button.on.low { border-color: var(--low); }
-  #reader { width: 100%; border-radius: 14px; overflow: hidden; background: #000; min-height: 200px; }
-  #reader video { border-radius: 14px; }
+  #reader { position: relative; width: 100%; border-radius: 14px; overflow: hidden; background: #000; min-height: 200px; aspect-ratio: 4 / 3; }
+  #reader video { display: block; width: 100%; height: 100%; object-fit: cover; }
+  #reader .frame { position: absolute; left: 6%; right: 6%; top: 30%; bottom: 30%; border: 2px solid rgba(255,255,255,.85); border-radius: 10px; box-shadow: 0 0 0 999px rgba(0,0,0,.25); pointer-events: none; transition: border-color .15s; }
+  #reader .frame.hit { border-color: var(--ok); }
+  #reader .state { position: absolute; left: 0; right: 0; bottom: 8px; text-align: center; color: #fff; font-size: 13px; text-shadow: 0 1px 2px #000; pointer-events: none; }
+  .zoom { display: flex; align-items: center; gap: 10px; margin: 4px 0 8px; color: var(--hint); font-size: 14px; }
+  .zoom input { flex: 1; }
   .tools { display: flex; gap: 8px; margin: 10px 0; }
   .tools input { flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--card); background: var(--card); color: var(--text); font: inherit; }
   .tools button, .ghost { padding: 10px 14px; border-radius: 10px; border: 0; background: var(--card); color: var(--text); font: inherit; }
@@ -69,7 +74,8 @@
     <button id="manual-add">Добавить</button>
     <button id="torch" hidden>🔦</button>
   </div>
-  <div class="hint">Наведите камеру на штрихкод контейнера. Его можно сканировать подряд: повторы не считаются.</div>
+  <div class="zoom" id="zoom-box" hidden>🔍 <input id="zoom" type="range" step="0.1"> <span id="zoom-val"></span></div>
+  <div class="hint">Штрихкод — в рамку, полосками поперёк. Держите телефон в 15–25 см; если код размыт, отодвиньте телефон и приблизьте зумом. Повторы не считаются.</div>
   <h2 id="list-title">Отсканировано</h2>
   <div id="list"></div>
 </div>
@@ -106,7 +112,6 @@
   var statuses = {};     // ean -> статус сейчас
   var items = [];        // отсканированные ean, в порядке сканирования
   var lastSeen = {};     // ean -> время последнего чтения (для подавления повторов)
-  var scanner = null;
   var addingEan = null;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -237,8 +242,9 @@
       return '<option value="' + b.replace(/"/g, '&quot;') + '">';
     }).join('');
     $('sheet').classList.add('open');
+    paused = true;
   }
-  function closeSheet() { $('sheet').classList.remove('open'); addingEan = null; }
+  function closeSheet() { $('sheet').classList.remove('open'); addingEan = null; paused = false; }
   $('s-cancel').onclick = closeSheet;
   $('s-save').onclick = function () {
     var brand = $('s-brand').value.trim(), flavor = $('s-flavor').value.trim();
@@ -277,33 +283,112 @@
   };
 
   // ---- камера ----
+  // Своё чтение кадров: высокое разрешение + непрерывный фокус. Распознавание — встроенный
+  // BarcodeDetector (Android/Chrome), иначе ZXing-C++ (WebAssembly), который работает и на iPhone.
+  var FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e'];
+  var video, track, detector, canvas, ctx, tick = 0, paused = false;
+
+  function makeDetector() {
+    var Native = window.BarcodeDetector;
+    var Pony = window.BarcodeDetectionAPI && BarcodeDetectionAPI.BarcodeDetector;
+    var pony = function () { return Pony ? new Pony({ formats: FORMATS }) : null; };
+    if (!Native || !Native.getSupportedFormats) return Promise.resolve(pony());
+    return Native.getSupportedFormats().then(function (f) {
+      return f.indexOf('ean_13') >= 0 ? new Native({ formats: FORMATS }) : pony();
+    }).catch(pony);
+  }
+
+  function setState(t) { var el = $('reader').querySelector('.state'); if (el) el.textContent = t; }
+
   function startCamera() {
-    var F = Html5QrcodeSupportedFormats;
-    scanner = new Html5Qrcode('reader', {
-      formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A],
-      experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-      verbose: false
+    $('reader').innerHTML = '<video playsinline muted autoplay></video><div class="frame"></div><div class="state">Запуск камеры…</div>';
+    video = $('reader').querySelector('video');
+    canvas = document.createElement('canvas');
+    ctx = canvas.getContext('2d', { willReadFrequently: true });
+    var cam = navigator.mediaDevices && navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, advanced: [{ focusMode: 'continuous' }] }
     });
-    scanner.start(
-      { facingMode: 'environment' },
-      { fps: 12, qrbox: function (w) { return { width: Math.floor(w * 0.9), height: 130 }; } },
-      function (text) { addCode(text); },
-      function () { /* кадр без кода — не ошибка */ }
-    ).then(function () {
-      try {
-        var caps = scanner.getRunningTrackCapabilities();
-        if (caps && caps.torch) {
-          var on = false;
-          $('torch').hidden = false;
-          $('torch').onclick = function () {
-            on = !on;
-            scanner.applyVideoConstraints({ advanced: [{ torch: on }] }).catch(function () { toast('Фонарик недоступен'); });
-          };
-        }
-      } catch (e) { /* без фонарика */ }
-    }).catch(function () {
-      $('reader').innerHTML = '<div class="err">Нет доступа к камере. Разрешите камеру для Telegram в настройках телефона или вводите код вручную.</div>';
+    if (!cam) return noCamera();
+    Promise.all([cam, makeDetector()]).then(function (r) {
+      detector = r[1];
+      if (!detector) throw new Error('detector');
+      video.srcObject = r[0];
+      track = r[0].getVideoTracks()[0];
+      return video.play();
+    }).then(function () {
+      setState('Ищу штрихкод…');
+      setupControls();
+      loop();
+    }).catch(function (e) {
+      if (e && e.message === 'detector') {
+        $('reader').innerHTML = '<div class="err">Не загрузилось распознавание. Проверьте интернет и откройте сканер заново или вводите код вручную.</div>';
+      } else noCamera();
     });
+  }
+
+  function noCamera() {
+    $('reader').innerHTML = '<div class="err">Нет доступа к камере. Разрешите камеру для Telegram в настройках телефона или вводите код вручную.</div>';
+  }
+
+  function setupControls() {
+    var caps = {};
+    try { caps = track.getCapabilities ? track.getCapabilities() : {}; } catch (e) {}
+    if (caps.torch) {
+      var on = false;
+      $('torch').hidden = false;
+      $('torch').onclick = function () {
+        on = !on;
+        track.applyConstraints({ advanced: [{ torch: on }] }).catch(function () { toast('Фонарик недоступен'); });
+      };
+    }
+    if (caps.zoom && caps.zoom.max > caps.zoom.min) {
+      var z = $('zoom'), max = Math.min(caps.zoom.max, 5);
+      z.min = caps.zoom.min; z.max = max; z.step = caps.zoom.step || 0.1;
+      var cur = (track.getSettings && track.getSettings().zoom) || caps.zoom.min;
+      z.value = cur; $('zoom-val').textContent = (+cur).toFixed(1) + '×';
+      $('zoom-box').hidden = false;
+      z.oninput = function () {
+        $('zoom-val').textContent = (+z.value).toFixed(1) + '×';
+        track.applyConstraints({ advanced: [{ zoom: +z.value }] }).catch(function () {});
+      };
+    }
+    // касание — перефокусировка (где камера это умеет)
+    video.onclick = function () {
+      track.applyConstraints({ advanced: [{ focusMode: 'single-shot' }] })
+        .then(function () { return track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); })
+        .catch(function () {});
+    };
+  }
+
+  // Чередуем: полоса по рамке (быстрее, крупнее) и весь кадр (если код не в рамке).
+  function grab() {
+    var w = video.videoWidth, h = video.videoHeight;
+    if (!w || !h) return null;
+    var full = (tick++ % 3) === 2;
+    var sy = full ? 0 : Math.round(h * 0.2), sh = full ? h : Math.round(h * 0.6);
+    var scale = Math.min(1, 1920 / w);
+    canvas.width = Math.round(w * scale); canvas.height = Math.round(sh * scale);
+    ctx.drawImage(video, 0, sy, w, sh, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  }
+
+  function loop() {
+    if (paused || document.hidden || !video || video.readyState < 2) return setTimeout(loop, 200);
+    var img = grab();
+    if (!img) return setTimeout(loop, 200);
+    detector.detect(img).then(function (codes) {
+      var good = null, bad = null;
+      (codes || []).forEach(function (c) {
+        var e = normalize(c.rawValue);
+        if (valid(e)) good = good || c.rawValue; else bad = bad || c.rawValue;
+      });
+      if (good) {
+        var f = $('reader').querySelector('.frame');
+        f.classList.add('hit'); setTimeout(function () { f.classList.remove('hit'); }, 400);
+        addCode(good);
+      } else if (bad) setState('Прочитано «' + bad + '» — это не EAN, поверните контейнер');
+    }).catch(function () {}).then(function () { setTimeout(loop, 80); });
   }
 
   // ---- старт ----
