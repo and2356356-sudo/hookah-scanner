@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Сканер кальянной</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #1a1a1a);
+    --hint: var(--tg-theme-hint-color, #6b7280);
+    --card: var(--tg-theme-secondary-bg-color, #f3f4f6);
+    --btn: var(--tg-theme-button-color, #2563eb);
+    --btn-text: var(--tg-theme-button-text-color, #ffffff);
+    --out: #dc2626;
+    --low: #d97706;
+    --ok: #16a34a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { padding: 12px 16px calc(96px + env(safe-area-inset-bottom)); }
+  .modes { display: flex; gap: 8px; margin-bottom: 12px; }
+  .modes button { flex: 1; padding: 10px; border-radius: 12px; border: 2px solid transparent; background: var(--card); color: var(--text); font: inherit; font-weight: 600; }
+  .modes button.on.empty { border-color: var(--out); }
+  .modes button.on.low { border-color: var(--low); }
+  #reader { width: 100%; border-radius: 14px; overflow: hidden; background: #000; min-height: 200px; }
+  #reader video { border-radius: 14px; }
+  .tools { display: flex; gap: 8px; margin: 10px 0; }
+  .tools input { flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--card); background: var(--card); color: var(--text); font: inherit; }
+  .tools button, .ghost { padding: 10px 14px; border-radius: 10px; border: 0; background: var(--card); color: var(--text); font: inherit; }
+  .hint { color: var(--hint); font-size: 14px; margin: 4px 0 12px; }
+  h2 { font-size: 15px; margin: 16px 0 8px; color: var(--hint); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+  .item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; margin-bottom: 8px; border-radius: 12px; background: var(--card); }
+  .item .name { flex: 1; min-width: 0; }
+  .item .name b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .name small { color: var(--hint); }
+  .item.unknown { outline: 2px solid var(--low); }
+  .item .x { border: 0; background: transparent; color: var(--hint); font-size: 22px; padding: 4px 8px; }
+  .item .add { border: 0; border-radius: 8px; background: var(--btn); color: var(--btn-text); padding: 6px 10px; font: inherit; font-size: 14px; }
+  .item.flash { animation: flash .6s; }
+  @keyframes flash { from { background: color-mix(in srgb, var(--btn) 35%, var(--card)); } to { background: var(--card); } }
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); background: var(--bg); box-shadow: 0 -1px 0 var(--card); }
+  .bar button { width: 100%; padding: 14px; border: 0; border-radius: 14px; background: var(--btn); color: var(--btn-text); font: inherit; font-weight: 700; font-size: 17px; }
+  .bar button:disabled { opacity: .45; }
+  .toast { position: fixed; left: 16px; right: 16px; top: 12px; padding: 10px 14px; border-radius: 12px; background: #111; color: #fff; text-align: center; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 20; }
+  .toast.show { opacity: .94; }
+  .sheet { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; align-items: flex-end; z-index: 10; }
+  .sheet.open { display: flex; }
+  .sheet .panel { width: 100%; background: var(--bg); border-radius: 18px 18px 0 0; padding: 16px 16px calc(16px + env(safe-area-inset-bottom)); }
+  .sheet label { display: block; margin: 10px 0 4px; font-size: 14px; color: var(--hint); }
+  .sheet input { width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--card); background: var(--card); color: var(--text); font: inherit; }
+  .sheet .row { display: flex; gap: 8px; margin-top: 16px; }
+  .sheet .row button { flex: 1; padding: 12px; border-radius: 12px; border: 0; font: inherit; font-weight: 600; background: var(--card); color: var(--text); }
+  .sheet .row button.primary { background: var(--btn); color: var(--btn-text); }
+  .err { padding: 16px; border-radius: 12px; background: var(--card); }
+</style>
+</head>
+<body>
+<div id="app" hidden>
+  <div class="modes">
+    <button id="m-empty" class="empty">🔴 Закончилось</button>
+    <button id="m-low" class="low">🟡 Кончается</button>
+  </div>
+  <div id="reader"></div>
+  <div class="tools">
+    <input id="manual" inputmode="numeric" placeholder="Код вручную (13 цифр)">
+    <button id="manual-add">Добавить</button>
+    <button id="torch" hidden>🔦</button>
+  </div>
+  <div class="hint">Наведите камеру на штрихкод контейнера. Его можно сканировать подряд: повторы не считаются.</div>
+  <h2 id="list-title">Отсканировано</h2>
+  <div id="list"></div>
+</div>
+<div id="fatal" class="err" hidden></div>
+
+<div class="bar"><button id="submit" disabled>Отправить</button></div>
+<div class="toast" id="toast"></div>
+
+<div class="sheet" id="sheet">
+  <div class="panel">
+    <b>Новый вкус в каталоге</b>
+    <div class="hint" id="s-ean"></div>
+    <label>Бренд</label>
+    <input id="s-brand" list="brands" autocomplete="off">
+    <datalist id="brands"></datalist>
+    <label>Вкус</label>
+    <input id="s-flavor" autocomplete="off">
+    <label>Фасовка, г (необязательно)</label>
+    <input id="s-size" inputmode="numeric" autocomplete="off">
+    <div class="row">
+      <button id="s-cancel">Отмена</button>
+      <button id="s-save" class="primary">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var tg = window.Telegram && Telegram.WebApp;
+  var params = new URLSearchParams(location.search);
+  var API = params.get('api');
+  var mode = params.get('mode') === 'low' ? 'low' : 'empty';
+  var catalog = {};      // ean -> {brand, flavor, size}
+  var statuses = {};     // ean -> статус сейчас
+  var items = [];        // отсканированные ean, в порядке сканирования
+  var lastSeen = {};     // ean -> время последнего чтения (для подавления повторов)
+  var scanner = null;
+  var addingEan = null;
+
+  var $ = function (id) { return document.getElementById(id); };
+  if (tg) { tg.ready(); tg.expand(); }
+
+  function fatal(msg) {
+    $('app').hidden = true;
+    $('fatal').hidden = false;
+    $('fatal').textContent = msg;
+    $('submit').parentNode.hidden = true;
+  }
+
+  // ---- EAN: та же проверка, что на сервере (Core.js) ----
+  function normalize(raw) {
+    var d = String(raw == null ? '' : raw).replace(/\D/g, '');
+    return d.length === 12 ? '0' + d : d;
+  }
+  function valid(code) {
+    if (!/^\d+$/.test(code) || (code.length !== 13 && code.length !== 8)) return false;
+    var sum = 0;
+    for (var i = code.length - 2, w = 3; i >= 0; i--, w = 4 - w) sum += +code.charAt(i) * w;
+    return (10 - (sum % 10)) % 10 === +code.charAt(code.length - 1);
+  }
+
+  // ---- связь с сервером (Apps Script) ----
+  function call(action, payload) {
+    var body = Object.assign({ action: action, initData: tg ? tg.initData : '' }, payload || {});
+    return fetch(API, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); });
+  }
+
+  var toastTimer;
+  function toast(text) {
+    var t = $('toast');
+    t.textContent = text;
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.classList.remove('show'); }, 1800);
+  }
+
+  function feedback(kind) {
+    try { if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred(kind); } catch (e) {}
+  }
+
+  // ---- режим ----
+  function setMode(m) {
+    mode = m;
+    $('m-empty').classList.toggle('on', m === 'empty');
+    $('m-low').classList.toggle('on', m === 'low');
+    render();
+  }
+  $('m-empty').onclick = function () { setMode('empty'); };
+  $('m-low').onclick = function () { setMode('low'); };
+
+  // ---- список ----
+  function nameOf(ean) {
+    var c = catalog[ean];
+    return c ? { title: c.brand + ' — ' + c.flavor, sub: (c.size ? c.size + ' г · ' : '') + ean } : null;
+  }
+
+  function render() {
+    var box = $('list');
+    box.innerHTML = '';
+    items.slice().reverse().forEach(function (ean) {
+      var n = nameOf(ean);
+      var div = document.createElement('div');
+      div.className = 'item' + (n ? '' : ' unknown');
+      div.id = 'i-' + ean;
+      var name = document.createElement('div');
+      name.className = 'name';
+      var b = document.createElement('b');
+      b.textContent = n ? n.title : 'Нет в каталоге';
+      var s = document.createElement('small');
+      var cur = statuses[ean];
+      s.textContent = (n ? n.sub : ean) + (cur ? ' · сейчас: ' + cur : '');
+      name.appendChild(b); name.appendChild(s);
+      div.appendChild(name);
+      if (!n) {
+        var add = document.createElement('button');
+        add.className = 'add'; add.textContent = 'Добавить';
+        add.onclick = function () { openSheet(ean); };
+        div.appendChild(add);
+      }
+      var x = document.createElement('button');
+      x.className = 'x'; x.textContent = '×'; x.setAttribute('aria-label', 'Убрать');
+      x.onclick = function () { items = items.filter(function (e) { return e !== ean; }); render(); };
+      div.appendChild(x);
+      box.appendChild(div);
+    });
+    $('list-title').textContent = items.length ? 'Отсканировано: ' + items.length : 'Пока ничего не отсканировано';
+    var label = mode === 'empty' ? 'Закончилось' : 'Кончается';
+    var btn = $('submit');
+    btn.disabled = !items.length;
+    btn.textContent = items.length ? 'Отправить как «' + label + '» (' + items.length + ')' : 'Отправить';
+  }
+
+  function addCode(raw) {
+    var ean = normalize(raw);
+    if (!valid(ean)) { toast('Код не распознан, попробуйте ещё раз'); return; }
+    var now = Date.now();
+    if (lastSeen[ean] && now - lastSeen[ean] < 2500) { lastSeen[ean] = now; return; }
+    lastSeen[ean] = now;
+    if (items.indexOf(ean) >= 0) { toast('Уже в списке'); return; }
+    items.push(ean);
+    feedback(catalog[ean] ? 'success' : 'warning');
+    render();
+    var el = $('i-' + ean);
+    if (el) el.classList.add('flash');
+    if (!catalog[ean]) openSheet(ean);
+  }
+
+  $('manual-add').onclick = function () {
+    var v = $('manual').value;
+    if (!v) return;
+    if (!valid(normalize(v))) { toast('Неверный код: проверьте цифры'); return; }
+    addCode(v);
+    $('manual').value = '';
+  };
+
+  // ---- добавление нового вкуса ----
+  function openSheet(ean) {
+    addingEan = ean;
+    $('s-ean').textContent = 'Штрихкод ' + ean;
+    $('s-brand').value = ''; $('s-flavor').value = ''; $('s-size').value = '';
+    var brands = {};
+    Object.keys(catalog).forEach(function (e) { brands[catalog[e].brand] = 1; });
+    $('brands').innerHTML = Object.keys(brands).sort().map(function (b) {
+      return '<option value="' + b.replace(/"/g, '&quot;') + '">';
+    }).join('');
+    $('sheet').classList.add('open');
+  }
+  function closeSheet() { $('sheet').classList.remove('open'); addingEan = null; }
+  $('s-cancel').onclick = closeSheet;
+  $('s-save').onclick = function () {
+    var brand = $('s-brand').value.trim(), flavor = $('s-flavor').value.trim();
+    if (!brand || !flavor) { toast('Нужны бренд и вкус'); return; }
+    var ean = addingEan;
+    $('s-save').disabled = true;
+    call('addCatalog', { ean: ean, brand: brand, flavor: flavor, size: $('s-size').value })
+      .then(function (r) {
+        if (!r.ok) throw new Error(r.error || 'ошибка');
+        catalog[ean] = r.item;
+        closeSheet(); render(); toast('Добавлено в каталог');
+      })
+      .catch(function (e) { toast('Не сохранилось: ' + e.message); })
+      .then(function () { $('s-save').disabled = false; });
+  };
+
+  // ---- отправка ----
+  function doSubmit() {
+    var btn = $('submit');
+    btn.disabled = true; btn.textContent = 'Отправляю…';
+    call('submit', { mode: mode, codes: items })
+      .then(function (r) {
+        if (!r.ok) throw new Error(r.error || 'ошибка');
+        feedback('success');
+        toast('Записано: ' + r.changed);
+        setTimeout(function () { if (tg) tg.close(); }, 700);
+      })
+      .catch(function (e) { toast('Не отправилось: ' + e.message); render(); });
+  }
+  $('submit').onclick = function () {
+    var unknown = items.filter(function (e) { return !catalog[e]; }).length;
+    if (!unknown) return doSubmit();
+    var msg = 'Не в каталоге: ' + unknown + '. Они будут пропущены. Отправить остальные?';
+    if (tg && tg.showConfirm) tg.showConfirm(msg, function (ok) { if (ok) doSubmit(); });
+    else if (confirm(msg)) doSubmit();
+  };
+
+  // ---- камера ----
+  function startCamera() {
+    var F = Html5QrcodeSupportedFormats;
+    scanner = new Html5Qrcode('reader', {
+      formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A],
+      experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+      verbose: false
+    });
+    scanner.start(
+      { facingMode: 'environment' },
+      { fps: 12, qrbox: function (w) { return { width: Math.floor(w * 0.9), height: 130 }; } },
+      function (text) { addCode(text); },
+      function () { /* кадр без кода — не ошибка */ }
+    ).then(function () {
+      try {
+        var caps = scanner.getRunningTrackCapabilities();
+        if (caps && caps.torch) {
+          var on = false;
+          $('torch').hidden = false;
+          $('torch').onclick = function () {
+            on = !on;
+            scanner.applyVideoConstraints({ advanced: [{ torch: on }] }).catch(function () { toast('Фонарик недоступен'); });
+          };
+        }
+      } catch (e) { /* без фонарика */ }
+    }).catch(function () {
+      $('reader').innerHTML = '<div class="err">Нет доступа к камере. Разрешите камеру для Telegram в настройках телефона или вводите код вручную.</div>';
+    });
+  }
+
+  // ---- старт ----
+  if (!API) return fatal('Страница открыта не из бота. Откройте сканер кнопкой в чате.');
+  if (!tg || !tg.initData) return fatal('Откройте сканер из Telegram: кнопка «Скан» в чате с ботом.');
+  call('init').then(function (r) {
+    if (!r.ok) {
+      if (/forbidden/.test(r.error)) return fatal('Нет доступа. Попросите администратора добавить ваш Telegram id.');
+      return fatal('Не удалось войти (' + r.error + '). Откройте сканер заново.');
+    }
+    r.catalog.forEach(function (c) { catalog[c.ean] = c; });
+    statuses = r.statuses || {};
+    $('app').hidden = false;
+    setMode(mode);
+    startCamera();
+  }).catch(function () { fatal('Нет связи с сервером. Проверьте интернет и откройте сканер заново.'); });
+})();
+</script>
+</body>
+</html>
