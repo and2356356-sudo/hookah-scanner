@@ -111,7 +111,8 @@
   var catalog = {};      // ean -> {brand, flavor, size}
   var statuses = {};     // ean -> статус сейчас
   var items = [];        // отсканированные ean, в порядке сканирования
-  var lastSeen = {};     // ean -> время последнего чтения (для подавления повторов)
+  var lastSeen = {};     // ean или ean+серийник -> время последнего чтения (для подавления повторов)
+  var serials = {};      // ean -> серийники отсканированных банок (из DataMatrix «Честного знака»)
   var addingEan = null;
 
   var $ = function (id) { return document.getElementById(id); };
@@ -125,11 +126,30 @@
   }
 
   // ---- EAN / GTIN: та же логика, что на сервере (Core.js) ----
+  // Код маркировки «Честного знака» → { gtin, serial } или null.
+  function parseMark(raw) {
+    var t = String(raw == null ? '' : raw).trim().replace(/^\][A-Za-z]\d/, '').replace(/^[\x1d\xe8]+/, '');
+    var m = /^\(01\)(\d{14})(?:\(21\)(.*?)(?=\(\d{2,4}\)|$))?/.exec(t);
+    if (m) return { gtin: m[1], serial: m[2] || '' };
+    m = /^01(\d{14})21([\s\S]+)$/.exec(t);
+    if (m) {
+      var r = m[2], gs = r.indexOf('\x1d'), serial;
+      if (gs >= 0) serial = r.slice(0, gs);
+      else {
+        var x = /^([\s\S]{7})(?:8005\d{6})?93[\s\S]{4}$/.exec(r) ||
+                /^([\s\S]{13})(?:91|92|93)[\s\S]+$/.exec(r) ||
+                /^([\s\S]{6})93[\s\S]{4}$/.exec(r);
+        serial = x ? x[1] : r.slice(0, 20);
+      }
+      return { gtin: m[1], serial: serial };
+    }
+    m = /^(\d{14})([\x21-\x7e]{7})[\x21-\x7e]{8}$/.exec(t);
+    if (m && valid(m[1])) return { gtin: m[1], serial: m[2] };
+    return null;
+  }
   function normalize(raw) {
-    var t = String(raw == null ? '' : raw).trim();
-    var gs1 = t.replace(/^\][A-Za-z]\d/, '').replace(/^[\x1d\xe8\s]+/, '');
-    var m = /^\(01\)(\d{14})/.exec(gs1) || (/\D/.test(gs1) || gs1.length > 14 ? /^01(\d{14})/.exec(gs1) : null);
-    var d = m ? m[1] : t.replace(/\D/g, '');
+    var mk = parseMark(raw);
+    var d = mk ? mk.gtin : String(raw == null ? '' : raw).replace(/\D/g, '');
     if (d.length === 14 && d.charAt(0) === '0') d = d.slice(1);
     return d.length === 12 ? '0' + d : d;
   }
@@ -190,7 +210,8 @@
       b.textContent = n ? n.title : 'Нет в каталоге';
       var s = document.createElement('small');
       var cur = statuses[ean];
-      s.textContent = (n ? n.sub : ean) + (cur ? ' · сейчас: ' + cur : '');
+      var ser = serials[ean] || [];
+      s.textContent = (n ? n.sub : ean) + (ser.length ? ' · банок: ' + ser.length + ' (№ ' + ser[ser.length - 1] + ')' : '') + (cur ? ' · сейчас: ' + cur : '');
       name.appendChild(b); name.appendChild(s);
       div.appendChild(name);
       if (!n) {
@@ -201,7 +222,7 @@
       }
       var x = document.createElement('button');
       x.className = 'x'; x.textContent = '×'; x.setAttribute('aria-label', 'Убрать');
-      x.onclick = function () { items = items.filter(function (e) { return e !== ean; }); render(); };
+      x.onclick = function () { items = items.filter(function (e) { return e !== ean; }); delete serials[ean]; render(); };
       div.appendChild(x);
       box.appendChild(div);
     });
@@ -215,10 +236,24 @@
   function addCode(raw) {
     var ean = normalize(raw);
     if (!valid(ean)) { toast('Код не распознан, попробуйте ещё раз'); return; }
+    var mk = parseMark(raw), serial = mk && mk.serial ? mk.serial : '';
+    var key = serial ? ean + '|' + serial : ean;
     var now = Date.now();
-    if (lastSeen[ean] && now - lastSeen[ean] < 2500) { lastSeen[ean] = now; return; }
-    lastSeen[ean] = now;
-    if (items.indexOf(ean) >= 0) { toast('Уже в списке'); return; }
+    // камера видит один и тот же код много раз подряд — молча пропускаем
+    if (lastSeen[key] && now - lastSeen[key] < 2500) { lastSeen[key] = now; return; }
+    lastSeen[key] = now;
+    var known = items.indexOf(ean) >= 0;
+    if (serial) {
+      var list = serials[ean] || (serials[ean] = []);
+      if (list.indexOf(serial) >= 0) { toast('Эта банка уже отсканирована (№ ' + serial + ')'); return; }
+      list.push(serial);
+      if (known) {
+        feedback('success'); render();
+        toast('Ещё банка этого вкуса — всего ' + list.length);
+        var e2 = $('i-' + ean); if (e2) e2.classList.add('flash');
+        return;
+      }
+    } else if (known) { toast('Уже в списке'); return; }
     items.push(ean);
     feedback(catalog[ean] ? 'success' : 'warning');
     render();
@@ -269,7 +304,7 @@
   function doSubmit() {
     var btn = $('submit');
     btn.disabled = true; btn.textContent = 'Отправляю…';
-    call('submit', { mode: mode, codes: items })
+    call('submit', { mode: mode, codes: items, serials: serials })
       .then(function (r) {
         if (!r.ok) throw new Error(r.error || 'ошибка');
         feedback('success');
@@ -385,7 +420,7 @@
     if (p.bars) bars(img, p.bars[0], p.bars[1], p.invert);
     return ZXingWASM.readBarcodes(img, {
       formats: p.formats, tryHarder: true, tryInvert: true, tryRotate: true, tryDenoise: true,
-      binarizer: p.binarizer, maxNumberOfSymbols: 4
+      binarizer: p.binarizer, maxNumberOfSymbols: 4, textMode: 'Plain'
     }).then(function (rs) { return rs.filter(function (r) { return r.isValid; }).map(function (r) { return r.text; }); });
   }
 
